@@ -1,0 +1,258 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+import os
+import sys
+import datetime
+import re
+from bs4 import BeautifulSoup
+import urllib2
+import getopt
+import xmltv
+import uuid
+
+# Valors possibles: ["tv3","33","super3","324","esport3","tv3cat"]
+CANALS=["tv3","tv3cat","33","super3","esport3"]
+BASEURL="http://www.ccma.cat/Comu/standalone/tv3_programacio_canal-"
+
+def usage():
+    print("""tv_grab_ccma usage:\t
+    --description: This grabber\t
+    --capabilities: show capabilities\t
+    --quiet: supress informational messages, show only errors\t
+    --output: write data to file\t
+    --days: fetch data for X days\t
+    --offset: fetch data for X days in future\t
+    -h,--help: Show this help""")
+
+# Recupera les URLs de la web, por canal
+def recupera_dias():
+    baseurl="http://www.ccma.cat/tv3/programacio/canal-"
+
+    dias={}
+    for c in CANALS:
+        url=baseurl+c
+        resp=urllib2.urlopen(url)
+        html=resp.read()
+        soup=BeautifulSoup(html,"lxml")
+        links=soup.find_all(attrs={"data-url":True})
+        dias[c]=[]
+        for l in links:
+            dias[c].append("http://www.ccma.cat"+l["data-url"])
+
+    return dias
+
+# Ajustat al canvi de web de 12/2014
+def explorar2(url):
+#    url=BASEURL+canal+"/contenidor/divgraella_"+canal+"_2/0/0"
+    resp=urllib2.urlopen(url)
+    html=resp.read()
+    soup=BeautifulSoup(html,"lxml")
+    lprogs=soup.find("ul",class_="programes").find_all("li")
+    epg=[]
+    for pr in lprogs:
+        horatext=pr["data-date"]
+        diahora=datetime.datetime.strptime(horatext,"%d/%m/%Y %H:%M:%S")
+        titol=pr.find("div",class_="informacio-programa").find_all("p")[0].get_text().strip()
+        subtitol=pr.find("div",class_="informacio-programa").find_all("p")[1].get_text().strip()
+        descr=pr.find("div",class_="mostraInfo").p.get_text().strip()
+
+        d={'horaini':diahora,'title':titol}
+        if subtitol:
+            d['sub-title']=subtitol
+        if descr:
+            d['desc']=descr
+        epg.append(d)
+
+    # Sumar un dia als programes que comencen més tard de mitjanit
+    i=1
+    while (i<len(epg)) and (epg[i]['horaini']>=epg[i-1]['horaini']): i+=1
+    if i<len(epg):
+        for j in range(i,len(epg)):
+            epg[j]['horaini']+=datetime.timedelta(1)
+#            print "Afegit un dia a %s %s" % (epg[j]['horaini'],epg[j]['title'])
+    return epg
+
+
+# Llegeix de la web l'HTML del dia/canal especificat, i retorna un llista de programes
+# ES POT ELIMINAR QUAN FUNCIONI BÉ EL explorar2
+def explorar(canal,dia):
+    url="/".join([BASEURL,dia.strftime("%Y%m%d"),canal])
+    resp=urllib2.urlopen(url)
+    html=resp.read()
+    soup=BeautifulSoup(html,"lxml")
+
+    lprogs=soup.find_all("div",class_="emissio")
+    epg=[]
+    for pr in lprogs:
+        # Mirar si és un programa simple o una agrupació de programes
+        if pr.ul:
+            # Si és un grup de programes, ignoram el grup i afegim els subprogrames
+            for p in pr.find_all("li"):
+                horatag=p.find("span",class_="hora")
+                horatext=horatag.get_text().strip()
+                hora=datetime.datetime.strptime(horatext,"%H:%M")
+                diahora=datetime.datetime.combine(dia,hora.time())
+
+                # El títol no està dins cap tag concret, simplement està a continuació de l'hora
+                llista=list(horatag.parent.stripped_strings)[1:3]
+                titol=llista[0]
+                subtitol=""
+                if len(llista)>1: subtitol=llista[1]
+
+                d={'horaini':diahora,'title':titol}
+                if p.textarea:
+                    d['desc']=p.textarea.get_text().strip()
+                if subtitol:
+                    d['sub-title']=subtitol
+                epg.append(d)
+        else:
+            # Si no tenia ul és que és un programa simple
+            hora=pr.find("span",class_="hora").get_text().strip()
+            hora=datetime.datetime.strptime(hora,"%H:%M")
+            diahora=datetime.datetime.combine(dia,hora.time())
+
+            llista=pr.p.get_text().strip().splitlines()
+            tit=llista[0]
+            d={'horaini':diahora,'title':tit}
+            if pr.textarea:
+                d['desc']=pr.textarea.get_text().strip()
+            if len(llista)>1: d['sub-title']=llista[1]
+            epg.append(d)
+
+    # Sumar un dia als programes que comencen més tard de mitjanit
+    i=1
+    while (i<len(epg)) and (epg[i]['horaini']>=epg[i-1]['horaini']): i+=1
+    if i<len(epg):
+        for j in range(i,len(epg)):
+            epg[j]['horaini']+=datetime.timedelta(1)
+#            print "Afegit un dia a %s %s" % (epg[j]['horaini'],epg[j]['title'])
+    return epg
+
+
+# Mirar d'endevinar algunes de les categories a partir del títol o paraules clau
+def endevinarcategories(epg):
+    # Diccionari amb expressions regulars que assignen cada categoria
+    generes={
+            "News / Current affairs": ["telenot.cies","not.cies"],
+            "Movie / Drama": ["cinema","pel.l.cula"],
+            "Documentary": ["[36]0 minuts","thalassa","sense ficci."],
+            "Comedy": ["pol.nia","crack.via"],
+            "Show / Game show": ["el gran dictat"],
+            "Children's / Youth programmes": ["tom i jerry","bola de drac","tork","doraemon","sailormoon","ast.rix","shin chan","peter pan","mic i els seus"],
+            "Tourism / Travel": ["afers exteriors"]
+            }
+    # Compilar regexes
+    for g in generes:
+        for i in range(len(generes[g])):
+            generes[g][i]=re.compile(generes[g][i],flags=re.IGNORECASE)
+
+    for canal in epg:
+        for prog in epg[canal]:
+            for g in generes:
+                if any(regex.match(prog["title"]) for regex in generes[g]):
+#                    print "el programa %s es de categoria %s" % (prog["title"],g)
+                    prog["category"]=g
+
+def main():
+    # Safe defaults
+    no_info = False
+    maxdays = 3
+    offset = 0
+    output_file = "/tmp/" + str(uuid.uuid4())
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "description", "capabilities", "quiet" ,\
+        "output=", "days=", "offset="])
+    except getopt.GetoptError, err:
+        # print help information and exit:
+        #print str(err) # will print something like "option -a not recognized"
+        usage()
+        sys.exit(2)
+    for o, a in opts:
+        if o in ("--description"):
+          print("tv_grab_ccma is a XMLTV grabber for Corporació Catalana de Mitjans Audiovisuals")
+          sys.exit()
+        elif o in ("--capabilities"):
+          print("baseline")
+          sys.exit()
+        elif o in ("--quiet"):
+          no_info = True
+        elif o in ("--output"):
+          output_file = a
+          new_file = True
+        elif o in ("--days"):
+          maxdays = int(a)
+        elif o in ("--offset"):
+          offset = int(a)
+        elif o in ("-h", "--help"):
+          usage()
+          sys.exit()
+    
+    # Inicialitzar la epg de cada canal com una llista buida
+    epg={}
+    for c in CANALS:
+        epg[c]=[]
+    # Llegir els programes de cada canal i dia, i afegir-los    
+    dias=recupera_dias()
+    for canal in CANALS:
+        for dia in range(offset, offset + maxdays):
+            diaexpl=(datetime.datetime.now()+datetime.timedelta(dia))
+            if no_info == False: 
+                print "Descarregant programació de %s per a la data %s... " % (canal,diaexpl.strftime("%Y%m%d")),
+            progsavui=explorar2(dias[canal][dia])
+            if no_info == False:
+                print "Llegits %d programes" % len(progsavui)
+            epg[canal] += progsavui
+
+    # Endevinar categories si és possible
+    if no_info == False:
+        print "Emplenant informació de categories..."
+    endevinarcategories(epg)
+
+    # Juntar Super3 i 33, són el mateix canal a diferents hores
+    if "canalsuper3" in epg.keys() and "33" in epg.keys():
+        print "Unint 33 i Super 3 a un sol canal..."
+        nou=epg["canalsuper3"]+epg["33"]
+        # Ordenar per data
+        nou.sort(key=lambda prog:prog["horaini"])
+        del epg["canalsuper3"]
+        del epg["33"]
+        epg["canalsuper3_33"]=nou
+
+    # Calcular l'hora final de cada espai posant la d'inici del següent programa (si és el darrer posam 1h)
+    for c in epg.keys():
+        for i in range(len(epg[c])):
+            if i<len(epg[c])-1:
+                epg[c][i]['horafi']=epg[c][i+1]['horaini']
+            else:
+                epg[c][i]['horafi']=epg[c][i]['horaini']+datetime.timedelta(hours=1)
+   
+    xmlfile = xmltv.Writer(date = datetime.datetime.now().strftime("%Y%m%d"), source_info_url = BASEURL)
+    for c in epg.keys():
+        xmlfile.addChannel({"id": 'C' + c + '.tv3.cat', "display-name": [(c, "ca")]})
+    for canal in epg:
+        for prog in epg[canal]:
+	    pr={}
+	    pr['title'] = [(prog['title'], '')]
+            if 'sub-title' in prog:
+                pr['sub-title'] = [(prog['sub-title'])]
+            if 'desc' in prog:
+                pr['desc'] = [(re.sub(r'[\r]','\n',prog['desc']), '')]
+            if 'category' in prog:
+                pr['category'] = [(prog['category'], 'ca')]
+	    pr['channel'] = 'C' + canal + '.tv3.cat'
+	    pr['start'] = prog['horaini'].strftime("%Y%m%d%H%M%S") 
+            pr['stop'] = prog['horafi'].strftime("%Y%m%d%H%M%S")
+	    xmlfile.addProgramme(pr)
+    xmlfile.write(output_file)
+    if not locals().has_key("new_file"):
+        print(open(output_file, "r").read())
+        os.remove(output_file)
+    
+if __name__ == "__main__":
+    # Run tv_grab_ccma
+    main()
+
+
+
+
+
