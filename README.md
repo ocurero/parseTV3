@@ -1,4 +1,4 @@
-parseTV3
+tv_grab_ccma (abans parseTV3)
 ========
 
 Petit script que permet descarregar-se la programació dels diferents canals de Televisió de Catalunya en format XMLTV, el format estàndard reconegut per qualsevol media center mínimament decent, com ara TVHeadend, MythTV, MediaPortal o semblants.
@@ -8,11 +8,11 @@ Petit script que permet descarregar-se la programació dels diferents canals de 
 
 La invocació és molt senzilla, basta executar:
 
-parseTV3.py .
+tv_grab_ccma
 
-Es generarà al directori actual un fitxer XMLTV amb la programació dels següents dies (3 dies si no s'indica una altra cosa amb el paràmetre -d).
+Es generarà al directori actual un fitxer XMLTV amb la programació dels següents dies (3 dies si no s'indica una altra cosa amb el paràmetre --maxdays).
 
-Per defecte es descarrega la informació de TV3 Cat, 3/24, 33 i Canal Super 3. Es poden afegir/eliminar canals modificant la variable de configuració CANALS que es troba al principi del fitxer. Els identificadors que s'han de posar a aquesta variable són els que es mostren als comentaris previs.
+Per defecte es descarrega la informació de TV3, TV3 Cat, 33, Esport3 i Canal Super 3. Es poden afegir/eliminar canals modificant la variable de configuració CANALS que es troba al principi del fitxer. Els identificadors que s'han de posar a aquesta variable són els que es mostren als comentaris previs.
 
 Els canals Súper 3 i 33 tenen un tractament especial ja que, malgrat aparèixer a la web de TV3 com dos canals diferents, en realitat corresponen a un mateix canal, només que a hores diferents. Per tant, encara que s'indiqui la descàrrega dels dos canals per separat, al fitxer de sortida apareixeran com un únic canal "canalsuper3_33".
 
